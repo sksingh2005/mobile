@@ -8,21 +8,20 @@ import * as FileSystem from 'expo-file-system';
 import { Audio } from 'expo-av';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { encode as base64Encode } from 'base64-arraybuffer';
+import { GEMINI_API_KEY, ELEVEN_LABS_API_KEY } from '@env';
 
 // Google Gemini API setup
-const GEMINI_API_KEY = 'AIzaSyBqJ56Bt8nbv73qrsEDVzVivYgSwsNRfHk'; // Replace with your key
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
 // Eleven Labs API setup
 const ELEVEN_LABS_API_BASE_URL = 'https://api.elevenlabs.io/v1/text-to-speech/';
-const ELEVEN_LABS_API_KEY = 'sk_7cf347a319162d336acb6e4210fb62bcd3cecd5314a9c2bc'; // Replace if restricted
 
 // Voice IDs (verified from Eleven Labs)
 const VOICE_IDS = {
   'en-IN': '21m00Tcm4TlvDq8ikWAM', // "Rachel" - English
   'hi-IN': 'MF3mGyEYCl7XYWbV9V6O', // Hindi voice
-  'ta-IN': 'jsCqWAovK2LkecY7zXl4', // Tamil voice
+  'ta-IN': 'jsCqWAovK2LkecY7zXl4', // Tamil voice (kept for UI but not used in logic)
 };
 
 const ChatbotAssistant = () => {
@@ -30,14 +29,14 @@ const ChatbotAssistant = () => {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [isListening, setIsListening] = useState(false);
-  const [selectedLanguage, setSelectedLanguage] = useState('en-IN');
+  const [selectedLanguage, setSelectedLanguage] = useState('hi-IN'); // Default to Hindi
   const [userId] = useState('user_' + Math.random().toString(36).substr(2, 9));
   const scrollViewRef = useRef();
   const [sound, setSound] = useState(null);
   const [chat, setChat] = useState(null);
   const [voiceReady, setVoiceReady] = useState(false);
 
-  // Initialize chat with history
+  // Initialize chat with history and language-specific prompt
   useEffect(() => {
     const initChat = async () => {
       const cachedHistory = await getCachedConversation();
@@ -47,7 +46,9 @@ const ChatbotAssistant = () => {
       }));
       const systemPrompt = {
         role: 'user',
-        parts: [{ text: 'You are a helpful AI assistant. Respond concisely and maintain context.' }],
+        parts: [{
+          text: `You are a helpful AI assistant. Respond concisely and maintain context. Always respond in ${selectedLanguage === 'en-IN' ? 'English' : 'Hindi'} based on the user's selected language.`
+        }],
       };
       const newChat = model.startChat({
         history: [systemPrompt, ...history],
@@ -56,18 +57,34 @@ const ChatbotAssistant = () => {
       setChat(newChat);
     };
     initChat();
-  }, []);
+  }, [selectedLanguage]); // Re-init chat when language changes
 
-  // Speech-to-text setup with initialization check
+  // Speech-to-text setup with detailed initialization
   useEffect(() => {
-    if (Platform.OS === 'web') return; // Skip for web
+    if (Platform.OS === 'web') {
+      console.log('Skipping Voice setup for web platform');
+      return;
+    }
 
     const initializeVoice = async () => {
       try {
-        await Voice.isAvailable();
-        Voice.onSpeechStart = () => setIsListening(true);
-        Voice.onSpeechEnd = () => setIsListening(false);
+        console.log('Initializing Voice module...');
+        const isAvailable = await Voice.isAvailable();
+        console.log('Voice.isAvailable result:', isAvailable);
+        if (!isAvailable) {
+          throw new Error('Voice module not available on this device');
+        }
+
+        Voice.onSpeechStart = () => {
+          console.log('Speech recognition started');
+          setIsListening(true);
+        };
+        Voice.onSpeechEnd = () => {
+          console.log('Speech recognition ended');
+          setIsListening(false);
+        };
         Voice.onSpeechResults = (e) => {
+          console.log('Speech results:', e.value);
           if (e.value && e.value.length > 0) {
             setInputText(e.value[0]);
             handleUserInput(e.value[0]);
@@ -78,15 +95,19 @@ const ChatbotAssistant = () => {
           setIsListening(false);
         };
         setVoiceReady(true);
+        console.log('Voice module initialized successfully');
       } catch (error) {
-        console.error('Voice initialization failed:', error);
+        console.error('Voice initialization failed:', error.message);
         setVoiceReady(false);
       }
     };
 
     initializeVoice();
 
-    return () => Voice.destroy().then(Voice.removeAllListeners);
+    return () => {
+      console.log('Cleaning up Voice module');
+      Voice.destroy().then(Voice.removeAllListeners);
+    };
   }, []);
 
   // Cleanup audio
@@ -114,7 +135,6 @@ const ChatbotAssistant = () => {
 
   const playAudio = async (audioUri) => {
     try {
-      // Verify file exists
       const fileInfo = await FileSystem.getInfoAsync(audioUri);
       if (!fileInfo.exists) {
         console.error('Audio file not found at:', audioUri);
@@ -149,19 +169,20 @@ const ChatbotAssistant = () => {
     try {
       if (!chat) throw new Error('Chat not initialized');
 
-      // Get response from Gemini
-      console.log('Sending to Gemini:', text);
-      const result = await chat.sendMessage(text);
+      // Enforce language-specific response
+      const languagePrompt = selectedLanguage === 'en-IN' ? 'Respond in English.' : 'Respond in Hindi.';
+      const messageWithLang = `${text}\n${languagePrompt}`;
+      console.log('Sending to Gemini:', messageWithLang);
+      const result = await chat.sendMessage(messageWithLang);
       const botResponse = (await result.response.text()) || 'Sorry, I couldn’t process that.';
       console.log('Gemini response:', botResponse);
 
-      // Update messages with Gemini response
       const botMessage = { text: botResponse, isBot: true, timestamp: new Date().toISOString() };
       const newMessages = [...updatedMessages, botMessage];
       setMessages(newMessages);
       await setCachedConversation(newMessages);
 
-      // Trigger Eleven Labs TTS
+      // Eleven Labs TTS with language-specific voice
       const ttsUrl = `${ELEVEN_LABS_API_BASE_URL}${VOICE_IDS[selectedLanguage]}`;
       console.log('Sending to Eleven Labs:', ttsUrl);
       const ttsResponse = await fetch(ttsUrl, {
@@ -207,20 +228,24 @@ const ChatbotAssistant = () => {
       return;
     }
     if (!voiceReady) {
-      alert('Speech recognition is not available. Please try typing.');
+      console.log('Voice not ready, alerting user');
+      alert('Speech recognition is not available on this device. Please use text input.');
       return;
     }
     try {
+      console.log('Requesting microphone permissions...');
       const { status } = await Audio.requestPermissionsAsync();
       if (status !== 'granted') {
-        alert('Microphone permission is required.');
+        console.log('Microphone permission denied');
+        alert('Microphone permission is required for speech recognition.');
         return;
       }
+      console.log('Starting speech recognition with language:', selectedLanguage);
       await Voice.start(selectedLanguage);
     } catch (error) {
       console.error('Speech recognition error:', error);
       setIsListening(false);
-      alert('Failed to start speech recognition. Please try again.');
+      alert('Failed to start speech recognition. Please try again or use text input.');
     }
   };
 
@@ -289,7 +314,7 @@ const ChatbotAssistant = () => {
                 style={styles.textInput}
                 value={inputText}
                 onChangeText={setInputText}
-                placeholder="Ask me anything..."
+                placeholder={selectedLanguage === 'en-IN' ? 'Ask me anything...' : 'मुझसे कुछ भी पूछें...'}
                 placeholderTextColor="#888"
                 onSubmitEditing={() => handleUserInput(inputText)}
               />
